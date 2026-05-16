@@ -1,0 +1,26 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+
+# Generated outputs
+out/
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.synctex.gz
+*.synctex\(busy\)
+*.fdb_latexmk
+*.fls
+*.xdv
+*.toc
+*.bbl
+*.blg
+
+# Local environments and IDE metadata
+.venv/
+.idea/
+
+# Local reference PDFs should not usually be committed to a public repo.
+文献/*.pdf
