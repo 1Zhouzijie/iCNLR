@@ -105,9 +105,10 @@ def make_default_functions(n_features: int) -> List[CandidateFunction]:
     Default candidate functions for a selected feature subset.
 
     For zero selected features, the only available model is an intercept-only
-    linear model.  For one selected feature, the paper-like nonlinear functions
-    are also included.  For several selected features, the function set contains
-    a linear and a log-linear model.
+    linear model.  For any non-empty selected feature set, an additive
+    paper-like nonlinear function is available.  For one selected feature, the
+    original one-dimensional paper-like nonlinear functions are also included.
+    For several selected features, a log-linear model is also available.
     """
     if n_features < 0:
         raise ValueError("n_features must be non-negative.")
@@ -130,6 +131,21 @@ def make_default_functions(n_features: int) -> List[CandidateFunction]:
 
     if n_features == 0:
         return funcs
+
+    def additive_f1(X: Array, b: Array) -> Array:
+        x = _safe_positive(X)
+        beta1 = np.exp(np.clip(float(b[2]), -50.0, 50.0))
+        transformed = np.power(x, b[1] - 1.0) * np.exp(-x / beta1)
+        return b[0] + transformed @ b[3:]
+
+    funcs.append(
+        CandidateFunction(
+            "additive_paper_f1",
+            n_features + 3,
+            additive_f1,
+            bounds=[(-100, 100), (-10, 10), (-5, 5)] + [(-100, 100)] * n_features,
+        )
+    )
 
     if n_features == 1:
 
