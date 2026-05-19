@@ -871,9 +871,10 @@ class VSICNLR:
                 mask[list(cols)] = True
                 masks.append(mask)
 
-        full_mask = np.ones(n_features, dtype=bool)
-        if not any(np.array_equal(mask, full_mask) for mask in masks):
-            masks.append(full_mask)
+        if self.max_selected_features is None or self.max_selected_features >= n_features:
+            full_mask = np.ones(n_features, dtype=bool)
+            if not any(np.array_equal(mask, full_mask) for mask in masks):
+                masks.append(full_mask)
 
         if self.max_feature_subsets is not None and len(masks) > self.max_feature_subsets:
             masks = self._sample_feature_masks(masks, self.max_feature_subsets, rng)
