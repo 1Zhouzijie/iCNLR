@@ -100,7 +100,10 @@ def _safe_positive(x: Array) -> Array:
     return np.maximum(np.asarray(x, dtype=float), 1e-8)
 
 
-def make_default_functions(n_features: int) -> List[CandidateFunction]:
+def make_default_functions(
+    n_features: int,
+    allowed_names: Optional[Sequence[str]] = None,
+) -> List[CandidateFunction]:
     """
     Default candidate functions for a selected feature subset.
 
@@ -113,24 +116,34 @@ def make_default_functions(n_features: int) -> List[CandidateFunction]:
     if n_features < 0:
         raise ValueError("n_features must be non-negative.")
 
+    allowed = None if allowed_names is None else set(allowed_names)
     funcs: List[CandidateFunction] = []
+
+    def add_function(function: CandidateFunction) -> None:
+        if allowed is None or function.name in allowed:
+            funcs.append(function)
 
     def linear(X: Array, beta: Array) -> Array:
         if X.shape[1] == 0:
             return np.full(X.shape[0], beta[0], dtype=float)
         return beta[0] + X @ beta[1:]
 
-    funcs.append(
-        CandidateFunction(
-            name="linear",
-            n_params=n_features + 1,
-            func=linear,
-            is_linear=True,
-        )
+    linear_function = CandidateFunction(
+        name="linear",
+        n_params=n_features + 1,
+        func=linear,
+        is_linear=True,
+    )
+    if n_features == 0:
+        funcs.append(linear_function)
+        return funcs
+
+    add_function(
+        linear_function
     )
 
-    if n_features == 0:
-        return funcs
+    if not funcs and allowed is not None and "linear" in allowed:
+        funcs.append(linear_function)
 
     def additive_f1(X: Array, b: Array) -> Array:
         x = _safe_positive(X)
@@ -138,16 +151,29 @@ def make_default_functions(n_features: int) -> List[CandidateFunction]:
         transformed = np.power(x, b[1] - 1.0) * np.exp(-x / beta1)
         return b[0] + transformed @ b[3:]
 
-    funcs.append(
+    add_function(
         CandidateFunction(
             "additive_paper_f1",
             n_features + 3,
             additive_f1,
-            bounds=[(-100, 100), (-10, 10), (-5, 5)] + [(-100, 100)] * n_features,
+            bounds=[(-3, 3), (0.2, 2), (-0.7, 2)] + [(-2.5, 2.5)] * n_features,
         )
     )
 
-    if n_features == 1:
+    paper_function_names = {
+        "paper_f1",
+        "paper_f2",
+        "paper_f3",
+        "paper_f5",
+        "paper_f7",
+        "paper_f9",
+        "paper_f11",
+        "paper_f13",
+    }
+    include_paper_functions = allowed is None or bool(allowed & paper_function_names)
+    include_log_linear = allowed is None or "log_linear" in allowed
+
+    if n_features == 1 and include_paper_functions:
 
         def f1(X: Array, b: Array) -> Array:
             x = _safe_positive(X[:, 0])
@@ -181,24 +207,23 @@ def make_default_functions(n_features: int) -> List[CandidateFunction]:
             x = X[:, 0]
             return 1.0 - np.exp(-b[0] * x - b[1] * x * x - b[2] * x * x * x)
 
-        funcs.extend(
-            [
-                CandidateFunction("paper_f1", 2, f1, bounds=[(-10, 10), (-10, 10)]),
-                CandidateFunction("paper_f2", 3, f2, bounds=[(-100, 100)] * 3),
-                CandidateFunction("paper_f3", 2, f3, bounds=[(-100, 100)] * 2),
-                CandidateFunction("paper_f5", 3, f5, bounds=[(-100, 100)] * 3),
-                CandidateFunction("paper_f7", 3, f7, bounds=[(-100, 100)] * 3),
-                CandidateFunction("paper_f9", 2, f9, bounds=[(-100, 100)] * 2),
-                CandidateFunction("paper_f11", 3, f11, bounds=[(-100, 100)] * 3),
-                CandidateFunction("paper_f13", 3, f13, bounds=[(-100, 100)] * 3),
-            ]
-        )
-    else:
+        for function in [
+            CandidateFunction("paper_f1", 2, f1, bounds=[(-10, 10), (-10, 10)]),
+            CandidateFunction("paper_f2", 3, f2, bounds=[(-100, 100)] * 3),
+            CandidateFunction("paper_f3", 2, f3, bounds=[(-100, 100)] * 2),
+            CandidateFunction("paper_f5", 3, f5, bounds=[(-100, 100)] * 3),
+            CandidateFunction("paper_f7", 3, f7, bounds=[(-100, 100)] * 3),
+            CandidateFunction("paper_f9", 2, f9, bounds=[(-100, 100)] * 2),
+            CandidateFunction("paper_f11", 3, f11, bounds=[(-100, 100)] * 3),
+            CandidateFunction("paper_f13", 3, f13, bounds=[(-100, 100)] * 3),
+        ]:
+            add_function(function)
+    elif n_features > 1 and include_log_linear:
 
         def log_linear(X: Array, beta: Array) -> Array:
             return beta[0] + np.log(_safe_positive(X)) @ beta[1:]
 
-        funcs.append(
+        add_function(
             CandidateFunction(
                 name="log_linear",
                 n_params=n_features + 1,
@@ -233,7 +258,12 @@ class VSICNLR:
         Optional cap on the number of masks.  If enumeration is larger, all
         one-feature, empty, and full masks are kept, then the rest are sampled.
     optimizers:
-        Optimization methods.  Supported: "BFGS", "CG", "SANN", "RANDOM".
+        Optimization methods.  Supported: "L-BFGS-B", "BFGS", "CG", "SANN",
+        "RANDOM".
+    center_candidate_functions, radius_candidate_functions:
+        Optional response-specific candidate function names.  Use this to
+        restrict linear scenarios to linear models, or nonlinear synthetic
+        scenarios to additive_paper_f1.
     n_init:
         Number of random restarts.
     max_iter:
@@ -254,6 +284,8 @@ class VSICNLR:
         max_selected_features: Optional[int] = None,
         max_feature_subsets: Optional[int] = None,
         optimizers: Sequence[str] = ("BFGS", "CG", "SANN"),
+        center_candidate_functions: Optional[Sequence[str]] = None,
+        radius_candidate_functions: Optional[Sequence[str]] = None,
         n_init: int = 20,
         max_iter: int = 100,
         tol: float = 1e-7,
@@ -276,6 +308,12 @@ class VSICNLR:
         self.max_selected_features = max_selected_features
         self.max_feature_subsets = max_feature_subsets
         self.optimizers = tuple(optimizers)
+        self.center_candidate_functions = (
+            None if center_candidate_functions is None else tuple(center_candidate_functions)
+        )
+        self.radius_candidate_functions = (
+            None if radius_candidate_functions is None else tuple(radius_candidate_functions)
+        )
         self.n_init = n_init
         self.max_iter = max_iter
         self.tol = tol
@@ -388,14 +426,26 @@ class VSICNLR:
         rng: np.random.Generator,
     ) -> List[ClusterModel]:
         previous = []
-        full_mask = np.ones(Xc.shape[1], dtype=bool)
+        empty_mask = np.zeros(Xc.shape[1], dtype=bool)
         for k in range(self.n_clusters):
             row_mask = labels == k
             center = self._fit_one_response_with_mask(
-                Xc[row_mask], yc[row_mask], full_mask, None, rng, response_scale="identity"
+                Xc[row_mask],
+                yc[row_mask],
+                empty_mask,
+                None,
+                rng,
+                response_scale="identity",
+                candidate_function_names=self.center_candidate_functions,
             )
             radius = self._fit_one_response_with_mask(
-                Xr[row_mask], yr[row_mask], full_mask, None, rng, response_scale="log"
+                Xr[row_mask],
+                yr[row_mask],
+                empty_mask,
+                None,
+                rng,
+                response_scale="log",
+                candidate_function_names=self.radius_candidate_functions,
             )
             previous.append(ClusterModel(center=center, radius=radius))
         return self._fit_all_clusters(Xc, Xr, yc, yr, labels, previous, feature_masks, rng)
@@ -441,6 +491,7 @@ class VSICNLR:
                 self.lambda_center,
                 rng,
                 response_scale="identity",
+                candidate_function_names=self.center_candidate_functions,
             )
             radius = self._fit_one_response_with_selection(
                 Xr[row_mask],
@@ -450,6 +501,7 @@ class VSICNLR:
                 self.lambda_radius,
                 rng,
                 response_scale="log",
+                candidate_function_names=self.radius_candidate_functions,
             )
             models.append(ClusterModel(center=center, radius=radius))
         return models
@@ -474,6 +526,7 @@ class VSICNLR:
             self.lambda_center,
             rng,
             response_scale="identity",
+            candidate_function_names=self.center_candidate_functions,
         )
         radii = self._fit_global_response_selection(
             Xr,
@@ -484,6 +537,7 @@ class VSICNLR:
             self.lambda_radius,
             rng,
             response_scale="log",
+            candidate_function_names=self.radius_candidate_functions,
         )
         return [ClusterModel(center=centers[k], radius=radii[k]) for k in range(self.n_clusters)]
 
@@ -497,6 +551,7 @@ class VSICNLR:
         lambda_: float,
         rng: np.random.Generator,
         response_scale: str,
+        candidate_function_names: Optional[Sequence[str]],
     ) -> List[FittedModel]:
         best_models: Optional[List[FittedModel]] = None
         best_score = np.inf
@@ -515,6 +570,7 @@ class VSICNLR:
                     previous[k],
                     rng,
                     response_scale=response_scale,
+                    candidate_function_names=candidate_function_names,
                 )
                 models.append(fitted)
                 total_sse += fitted.sse
@@ -544,13 +600,20 @@ class VSICNLR:
         lambda_: float,
         rng: np.random.Generator,
         response_scale: str,
+        candidate_function_names: Optional[Sequence[str]],
     ) -> FittedModel:
         best: Optional[FittedModel] = None
         best_score = np.inf
 
         for feature_mask in feature_masks:
             fitted = self._fit_one_response_with_mask(
-                X, y, feature_mask, previous, rng, response_scale=response_scale
+                X,
+                y,
+                feature_mask,
+                previous,
+                rng,
+                response_scale=response_scale,
+                candidate_function_names=candidate_function_names,
             )
             score = self._selection_score(
                 fitted.sse,
@@ -575,9 +638,10 @@ class VSICNLR:
         previous: Optional[FittedModel],
         rng: np.random.Generator,
         response_scale: str = "identity",
+        candidate_function_names: Optional[Sequence[str]] = None,
     ) -> FittedModel:
         X_selected = X[:, feature_mask]
-        funcs = make_default_functions(X_selected.shape[1])
+        funcs = make_default_functions(X_selected.shape[1], candidate_function_names)
         previous_for_mask = (
             previous
             if previous is not None
@@ -664,8 +728,13 @@ class VSICNLR:
         objective = lambda beta: self._sse(function, beta, X_selected, y)
         optimizer = optimizer.upper()
 
-        if minimize is not None and optimizer in {"BFGS", "CG"}:
-            result = minimize(objective, start, method=optimizer, options={"maxiter": 500})
+        if optimizer == "LBFGSB":
+            optimizer = "L-BFGS-B"
+
+        if minimize is not None and optimizer in {"L-BFGS-B", "BFGS", "CG"}:
+            bounds = function.bounds if optimizer == "L-BFGS-B" else None
+            start = self._clip_to_bounds(start, bounds)
+            result = minimize(objective, start, method=optimizer, bounds=bounds, options={"maxiter": 500})
             if result.success and np.isfinite(result.fun):
                 return FittedModel(
                     function,
@@ -690,8 +759,8 @@ class VSICNLR:
                 )
             return None
 
-        if optimizer in {"BFGS", "CG", "SANN", "ANNEALING", "RANDOM"}:
-            beta, value = self._fallback_random_search(objective, start, rng)
+        if optimizer in {"L-BFGS-B", "BFGS", "CG", "SANN", "ANNEALING", "RANDOM"}:
+            beta, value = self._fallback_random_search(objective, start, rng, function.bounds)
             if np.isfinite(value):
                 return FittedModel(
                     function,
@@ -704,16 +773,27 @@ class VSICNLR:
         return None
 
     @staticmethod
+    def _clip_to_bounds(start: Array, bounds: Optional[Sequence[Tuple[float, float]]]) -> Array:
+        beta = np.asarray(start, dtype=float).copy()
+        if bounds is None:
+            return beta
+        lower = np.array([bound[0] for bound in bounds], dtype=float)
+        upper = np.array([bound[1] for bound in bounds], dtype=float)
+        return np.clip(beta, lower, upper)
+
+    @staticmethod
     def _fallback_random_search(
         objective: Callable[[Array], float],
         start: Array,
         rng: np.random.Generator,
+        bounds: Optional[Sequence[Tuple[float, float]]] = None,
     ) -> Tuple[Array, float]:
-        best_beta = np.asarray(start, dtype=float).copy()
+        best_beta = VSICNLR._clip_to_bounds(start, bounds)
         best_value = objective(best_beta)
         step = 1.0
         for _ in range(250):
             candidate = best_beta + rng.normal(0.0, step, size=best_beta.shape)
+            candidate = VSICNLR._clip_to_bounds(candidate, bounds)
             value = objective(candidate)
             if value < best_value:
                 best_beta = candidate

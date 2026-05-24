@@ -117,14 +117,23 @@ def generate_vs_icnlr_data(
     for k in range(n_clusters):
         row_mask = labels == k
         n_k = int(np.sum(row_mask))
-        low, high = _cluster_range(k, relation)
+        center_low, center_high = _cluster_range(k, n_clusters, relation, "center", center_model)
+        radius_low, radius_high = _cluster_range(k, n_clusters, relation, "radius", radius_model)
 
-        X_center[row_mask, :n_informative] = rng.uniform(low, high, size=(n_k, n_informative))
-        X_radius[row_mask, :n_informative] = rng.uniform(0.05, 0.30, size=(n_k, n_informative))
+        X_center[row_mask, :n_informative] = rng.uniform(
+            center_low,
+            center_high,
+            size=(n_k, n_informative),
+        )
+        X_radius[row_mask, :n_informative] = rng.uniform(
+            radius_low,
+            radius_high,
+            size=(n_k, n_informative),
+        )
 
     if n_noise:
         X_center[:, n_informative:] = rng.uniform(0.5, 8.0, size=(n_samples, n_noise))
-        X_radius[:, n_informative:] = rng.uniform(0.05, 0.30, size=(n_samples, n_noise))
+        X_radius[:, n_informative:] = rng.uniform(0.5, 10.0, size=(n_samples, n_noise))
 
     y_center = np.empty(n_samples, dtype=float)
     y_radius_log = np.empty(n_samples, dtype=float)
@@ -139,6 +148,7 @@ def generate_vs_icnlr_data(
         center_values, center_params[k] = _generate_response_component(
             Xk_center,
             k,
+            n_clusters,
             center_model,
             response_kind="center",
             rng=rng,
@@ -146,6 +156,7 @@ def generate_vs_icnlr_data(
         radius_log_values, radius_params[k] = _generate_response_component(
             Xk_radius,
             k,
+            n_clusters,
             radius_model,
             response_kind="radius",
             rng=rng,
@@ -267,27 +278,133 @@ def _balanced_labels(n_samples: int, n_clusters: int) -> Array:
     return labels.astype(int)
 
 
-def _cluster_range(k: int, relation: RelationType) -> Tuple[float, float]:
-    if relation == "disjoint":
-        return 1.0 + 3.0 * k, 2.0 + 3.0 * k
-    if relation == "intersecting":
-        return 1.0 + 1.0 * k, 3.0 + 1.0 * k
-    if relation == "overlapping":
-        return 1.0, 4.0
-    raise ValueError(f"Unknown relation: {relation}")
+def _cluster_range(
+    k: int,
+    n_clusters: int,
+    relation: RelationType,
+    response_kind: Literal["center", "radius"],
+    model_type: ModelType,
+) -> Tuple[float, float]:
+    """
+    Paper-inspired fixed covariate ranges.
+
+    The original implementation used one narrow rule for every scenario, e.g.
+    disjoint clusters were U(1, 2), U(4, 5), ... .  That made some regression
+    clusters hard to identify even when the variable selection was correct.
+    These ranges keep the VS extension but use wider, scenario-specific ranges
+    closer to the synthetic designs in de Carvalho et al. (2021).
+    """
+    if n_clusters == 2:
+        if relation == "disjoint":
+            ranges = [(0.5, 3.0), (4.0, 8.0)]
+        elif relation == "intersecting":
+            ranges = [(0.5, 3.0), (2.0, 5.0)]
+        elif relation == "overlapping":
+            ranges = [(0.5, 4.0), (0.5, 4.0)]
+        else:
+            raise ValueError(f"Unknown relation: {relation}")
+    elif n_clusters == 3:
+        if relation == "disjoint":
+            if response_kind == "radius" and model_type == "nonlinear":
+                ranges = [(0.5, 4.0), (4.0, 8.0), (8.0, 12.0)]
+            else:
+                ranges = [(0.5, 2.0), (3.0, 5.0), (6.0, 9.0)]
+        elif relation == "intersecting":
+            if response_kind == "radius" and model_type == "nonlinear":
+                ranges = [(0.5, 4.0), (2.0, 8.0), (5.0, 10.0)]
+            else:
+                ranges = [(0.5, 4.0), (3.0, 6.0), (5.0, 8.0)]
+        elif relation == "overlapping":
+            if response_kind == "radius" and model_type == "nonlinear":
+                ranges = [(0.5, 10.0), (0.5, 10.0), (0.5, 10.0)]
+            else:
+                ranges = [(0.5, 4.0), (0.5, 4.0), (0.5, 4.0)]
+        else:
+            raise ValueError(f"Unknown relation: {relation}")
+    else:
+        raise ValueError("Only n_clusters in {2, 3} is supported by the scenario grid.")
+    return ranges[k]
+
+
+def _coefficient_vector(base_slope: float, n_features: int) -> Array:
+    multipliers = np.linspace(1.0, 0.6, n_features)
+    return base_slope * multipliers
+
+
+def _weight_vector(base_weight: float, n_features: int) -> Array:
+    multipliers = np.linspace(1.0, 0.7, n_features)
+    return base_weight * multipliers
+
+
+def _linear_parameters(
+    cluster_id: int,
+    n_clusters: int,
+    response_kind: Literal["center", "radius"],
+    n_features: int,
+) -> Tuple[float, Array]:
+    if response_kind == "center":
+        if n_clusters == 2:
+            intercepts = [3.0, 0.5]
+            slopes = [-1.0, 1.0]
+        else:
+            intercepts = [4.0, 2.0, 1.0]
+            slopes = [1.0, 2.0, 3.0]
+    else:
+        # Log-radius scale: keep slopes identifiable without creating huge
+        # intervals after exponentiation.
+        if n_clusters == 2:
+            intercepts = [-2.0, -1.8]
+            slopes = [0.25, -0.20]
+        else:
+            intercepts = [-2.0, -1.8, -1.6]
+            slopes = [0.22, -0.18, 0.15]
+    return intercepts[cluster_id], _coefficient_vector(slopes[cluster_id], n_features)
+
+
+def _nonlinear_parameters(
+    cluster_id: int,
+    n_clusters: int,
+    response_kind: Literal["center", "radius"],
+    n_features: int,
+) -> Tuple[float, float, float, Array]:
+    if n_clusters == 2:
+        beta0_values = [0.5, 1.0]
+        beta1_values = [2.0, 3.0]
+        if response_kind == "center":
+            intercepts = [0.5, 0.75]
+            base_weights = [1.5, -1.2]
+        else:
+            intercepts = [-2.0, -1.8]
+            base_weights = [1.2, -1.0]
+    else:
+        beta0_values = [0.5, 0.75, 0.75]
+        beta1_values = [1.0, 4.0, 6.0]
+        if response_kind == "center":
+            intercepts = [0.5, 1.0, 1.5]
+            base_weights = [1.5, -1.2, -1.4]
+        else:
+            intercepts = [-2.0, -1.8, -1.6]
+            base_weights = [1.2, -1.0, -1.2]
+    return (
+        intercepts[cluster_id],
+        beta0_values[cluster_id],
+        beta1_values[cluster_id],
+        _weight_vector(base_weights[cluster_id], n_features),
+    )
 
 
 def _generate_response_component(
     X: Array,
     cluster_id: int,
+    n_clusters: int,
     model_type: ModelType,
     response_kind: Literal["center", "radius"],
     rng: np.random.Generator,
 ) -> Tuple[Array, Dict[str, object]]:
+    del rng
+    n_features = X.shape[1]
     if model_type == "linear":
-        intercept = (cluster_id + 1) if response_kind == "center" else -2.0 + 0.20 * cluster_id
-        coef_low, coef_high = ((0.7, 1.8) if response_kind == "center" else (0.08, 0.25))
-        beta = rng.uniform(coef_low, coef_high, size=X.shape[1])
+        intercept, beta = _linear_parameters(cluster_id, n_clusters, response_kind, n_features)
         values = intercept + X @ beta
         response_scale = "identity" if response_kind == "center" else "log"
         return values, {
@@ -298,11 +415,12 @@ def _generate_response_component(
         }
 
     if model_type == "nonlinear":
-        beta0 = 1.5 + 0.25 * cluster_id
-        beta1 = 1.2 + 0.35 * cluster_id
-        intercept = (cluster_id + 1) * 0.5 if response_kind == "center" else -2.0 + 0.10 * cluster_id
-        weight_low, weight_high = ((0.8, 1.6) if response_kind == "center" else (0.06, 0.18))
-        weights = rng.uniform(weight_low, weight_high, size=X.shape[1])
+        intercept, beta0, beta1, weights = _nonlinear_parameters(
+            cluster_id,
+            n_clusters,
+            response_kind,
+            n_features,
+        )
         transformed = paper_nonlinear_function(X, beta0, beta1)
         values = intercept + transformed @ weights
         response_scale = "identity" if response_kind == "center" else "log"

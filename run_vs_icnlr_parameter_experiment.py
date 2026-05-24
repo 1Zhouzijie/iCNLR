@@ -30,6 +30,7 @@ Run:
 from __future__ import annotations
 
 import csv
+import json
 import warnings
 from itertools import permutations
 from pathlib import Path
@@ -88,20 +89,16 @@ def true_linear_beta(params: Dict[str, object], n_features: int) -> np.ndarray:
 
 def nonlinear_beta(model: FittedModel, n_features: int) -> Optional[np.ndarray]:
     """Expand supported nonlinear parameter estimates to a comparable vector."""
-    if model.function.name == "additive_paper_f1":
-        beta = np.asarray(model.beta, dtype=float)
-        full = np.zeros(n_features + 3, dtype=float)
-        full[:3] = beta[:3]
-        selected = np.where(model.feature_mask)[0]
-        if len(selected) != len(beta) - 3:
-            return None
-        full[3 + selected] = beta[3:]
-        return full
-    if model.function.name != "paper_f1":
+    if model.function.name != "additive_paper_f1":
         return None
-    if model.n_selected_features != 1:
+    beta = np.asarray(model.beta, dtype=float)
+    full = np.zeros(n_features + 3, dtype=float)
+    full[:3] = beta[:3]
+    selected = np.where(model.feature_mask)[0]
+    if len(selected) != len(beta) - 3:
         return None
-    return np.asarray(model.beta, dtype=float)
+    full[3 + selected] = beta[3:]
+    return full
 
 
 def true_nonlinear_beta(params: Dict[str, object], n_features: int) -> np.ndarray:
@@ -145,6 +142,94 @@ def model_parameter_rmse(
     truth = true_nonlinear_beta(true_params, n_features)
     return rmse(estimated, truth)
 
+
+def candidate_functions_for_model(model_type: str) -> Tuple[str, ...]:
+    if model_type == "linear":
+        return ("linear",)
+    if model_type == "nonlinear":
+        return ("additive_paper_f1",)
+    raise ValueError(f"Unknown model type: {model_type}")
+
+
+def rounded_list(values: np.ndarray, digits: int = 6) -> List[float]:
+    return [round(float(value), digits) for value in np.asarray(values, dtype=float)]
+
+
+def selected_feature_numbers(mask: np.ndarray) -> List[int]:
+    return [int(index + 1) for index in np.where(np.asarray(mask, dtype=bool))[0]]
+
+
+def boundary_hit(model: FittedModel, tol: float = 1e-4) -> bool:
+    if model.function.bounds is None:
+        return False
+    beta = np.asarray(model.beta, dtype=float)
+    if len(beta) != len(model.function.bounds):
+        return False
+    for value, (lower, upper) in zip(beta, model.function.bounds):
+        if abs(float(value) - float(lower)) <= tol or abs(float(value) - float(upper)) <= tol:
+            return True
+    return False
+
+
+def cluster_mapping_diagnostic(mapping: Dict[int, int]) -> str:
+    return ";".join(f"est{estimated}->true{true}" for estimated, true in sorted(mapping.items()))
+
+
+def cluster_size_diagnostic(labels: np.ndarray, n_clusters: int) -> str:
+    counts = np.bincount(np.asarray(labels, dtype=int), minlength=n_clusters)
+    return ";".join(f"est{k}:{int(counts[k])}" for k in range(n_clusters))
+
+
+def model_diagnostics(model: VSICNLR, mapping: Dict[int, int], response: str) -> Dict[str, str]:
+    entries = []
+    for estimated_cluster, true_cluster in sorted(mapping.items(), key=lambda item: item[1]):
+        cluster_model = model.models_[estimated_cluster]
+        fitted = cluster_model.center if response == "center" else cluster_model.radius
+        entries.append(
+            (
+                true_cluster,
+                fitted.function.name,
+                selected_feature_numbers(fitted.feature_mask),
+                rounded_list(fitted.beta),
+                boundary_hit(fitted),
+            )
+        )
+    return {
+        f"{response}_functions": ";".join(f"true{true}:{name}" for true, name, _, _, _ in entries),
+        f"{response}_selected_features": ";".join(
+            f"true{true}:{json.dumps(features)}" for true, _, features, _, _ in entries
+        ),
+        f"{response}_betas": ";".join(
+            f"true{true}:{json.dumps(beta)}" for true, _, _, beta, _ in entries
+        ),
+        f"{response}_boundary_hits": ";".join(
+            f"true{true}:{int(hit)}" for true, _, _, _, hit in entries
+        ),
+    }
+
+
+def response_fit_rmse(data: SimulationData, model: VSICNLR, response: str) -> float:
+    if response == "center":
+        X = data.X_center
+        y = data.y_center
+        get_fitted = lambda cluster_model: cluster_model.center
+    elif response == "radius":
+        X = data.X_radius
+        y = data.y_radius
+        get_fitted = lambda cluster_model: cluster_model.radius
+    else:
+        raise ValueError('response must be "center" or "radius".')
+
+    total = 0.0
+    n_samples = len(y)
+    for k in range(int(data.metadata["n_clusters"])):
+        row_mask = model.labels_ == k
+        if not np.any(row_mask):
+            continue
+        fitted = get_fitted(model.models_[k])
+        total += float(np.sum(fitted.loss(X[row_mask], y[row_mask])))
+    return float(np.sqrt(total / max(n_samples, 1)))
+
 #TPR：真实有用变量中，有多少被选出来了；
 #FPR：真实无用变量中，有多少被错误选出来了；
 #exact：是否变量集合完全正确。
@@ -171,6 +256,8 @@ def evaluate_replicate(
     n_clusters = int(data.metadata["n_clusters"])
     n_features = data.X_lower.shape[1]
     mapping = align_clusters(data.labels, model.labels_, n_clusters)
+    center_diagnostics = model_diagnostics(model, mapping, "center")
+    radius_diagnostics = model_diagnostics(model, mapping, "radius")
 
     center_rmse_values = []
     radius_rmse_values = []
@@ -214,6 +301,10 @@ def evaluate_replicate(
         "objective": model.objective_,
         "sse": model.sse_,
         "clustering_accuracy": clustering_accuracy(data.labels, model.labels_, mapping),
+        "cluster_mapping": cluster_mapping_diagnostic(mapping),
+        "estimated_cluster_sizes": cluster_size_diagnostic(model.labels_, n_clusters),
+        "center_fit_rmse": response_fit_rmse(data, model, "center"),
+        "radius_log_fit_rmse": response_fit_rmse(data, model, "radius"),
         "center_param_rmse": finite_mean(center_rmse_values),
         "radius_param_rmse": finite_mean(radius_rmse_values),
         "center_selection_tpr": float(np.mean(center_tpr_values)),
@@ -222,6 +313,8 @@ def evaluate_replicate(
         "radius_selection_tpr": float(np.mean(radius_tpr_values)),
         "radius_selection_fpr": float(np.mean(radius_fpr_values)),
         "radius_selection_exact": float(np.mean(radius_exact_values)),
+        **center_diagnostics,
+        **radius_diagnostics,
     }
 
 
@@ -279,19 +372,19 @@ def write_csv(rows: Sequence[Dict[str, object]], path: Path) -> None:
 
 
 def run_parameter_experiment(
-    n_replicates: int = 10,
-    n_samples: int = 120,
-    n_informative: int = 2,
-    n_noise: int = 4,
+    n_replicates: int = 20,
+    n_samples: int = 100,
+    n_informative: int = 1,
+    n_noise: int = 2,
     selection_scope: str = "group",
     scenario_ids: Optional[Iterable[int]] = None,
-    optimizers: Sequence[str] = ("RANDOM",),
+    optimizers: Sequence[str] = ("L-BFGS-B", "CG", "RANDOM"),
     output_dir: Path = Path("out") / "vs_icnlr_parameter_experiment",
 ) -> Tuple[List[Dict[str, object]], List[Dict[str, object]]]:
     rows: List[Dict[str, object]] = []
     scenarios = scenario_grid()
     if scenario_ids is None:
-        scenario_ids = range(1, 25)
+        scenario_ids = range(7, 13)
     selected_scenario_ids = set(int(scenario_id) for scenario_id in scenario_ids)
 
     for scenario_id, scenario in enumerate(scenarios, start=1):
@@ -310,13 +403,15 @@ def run_parameter_experiment(
                 n_clusters=int(scenario["n_clusters"]),
                 selection_scope=selection_scope,
                 selection_criterion="penalty",
-                lambda_center=0.05,
-                lambda_radius=0.05,
+                lambda_center=0.001,
+                lambda_radius=0.001,
                 max_selected_features=n_informative,
                 max_feature_subsets=100,
                 optimizers=optimizers,
+                center_candidate_functions=candidate_functions_for_model(str(scenario["center_model"])),
+                radius_candidate_functions=candidate_functions_for_model(str(scenario["radius_model"])),
                 n_init=15,
-                max_iter=30,
+                max_iter=15,
                 random_state=seed,
             )
             with warnings.catch_warnings():
