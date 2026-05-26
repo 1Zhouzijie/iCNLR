@@ -20,8 +20,8 @@ et al. (2021), with an added variable-selection target:
 
     The script writes two CSV files:
 
-- out/vs_icnlr_parameter_experiment/replicate_results.csv
-- out/vs_icnlr_parameter_experiment/scenario_summary.csv
+- out/vs_icnlr_parameter_experiment_linear-nonlinear/replicate_results.csv
+- out/vs_icnlr_parameter_experiment_linear-nonlinear/scenario_summary.csv
 
 Run:
     python3 -B run_vs_icnlr_parameter_experiment.py
@@ -379,12 +379,12 @@ def run_parameter_experiment(
     selection_scope: str = "group",
     scenario_ids: Optional[Iterable[int]] = None,
     optimizers: Sequence[str] = ("L-BFGS-B", "CG", "RANDOM"),
-    output_dir: Path = Path("out") / "vs_icnlr_parameter_experiment",
+    output_dir: Path = Path("out") / "vs_icnlr_parameter_experiment_linear-linear",
 ) -> Tuple[List[Dict[str, object]], List[Dict[str, object]]]:
     rows: List[Dict[str, object]] = []
     scenarios = scenario_grid()
     if scenario_ids is None:
-        scenario_ids = range(7, 13)
+        scenario_ids = range(1, 7)
     selected_scenario_ids = set(int(scenario_id) for scenario_id in scenario_ids)
 
     for scenario_id, scenario in enumerate(scenarios, start=1):
@@ -435,7 +435,7 @@ def main() -> None:
     rows, summaries = run_parameter_experiment()
     print(f"\nFinished {len(rows)} replicate runs.")
     print("Summary rows:", len(summaries))
-    print("Output directory: out/vs_icnlr_parameter_experiment")
+    print("Output directory: out/vs_icnlr_parameter_experiment_linear-linear")
 
 
 if __name__ == "__main__":

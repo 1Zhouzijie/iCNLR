@@ -248,7 +248,7 @@ def run_lambda_experiment(
     n_init: int = 3,
     max_iter: int = 10,
     max_feature_subsets: int = 100,
-    output_dir: Path = Path("out") / "vs_icnlr_lambda_experiment",
+    output_dir: Path = Path("out") / "vs_icnlr_lambda_experiment_linear-linear",
 ) -> Tuple[List[Dict[str, object]], List[Dict[str, object]], List[Dict[str, object]]]:
     rows: List[Dict[str, object]] = []
     scenarios = scenario_grid()
@@ -372,7 +372,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("out") / "vs_icnlr_lambda_experiment",
+        default=Path("out") / "vs_icnlr_lambda_experiment_linear-linear",
     )
     return parser
 
